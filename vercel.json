@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "crons": [
+    {
+      "path": "/cron/sync-projects",
+      "schedule": "0 6 * * *"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index"
+    }
+  ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 300
+    }
+  }
+}
