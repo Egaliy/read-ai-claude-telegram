@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.kv import AllowedChatsStore, SubscriberStore
 from app.models import ReadAIWebhookPayload
-from app.pipeline import process_meeting, queue_meeting
+from app import task_preview
+from app.pipeline import load_pending_payload, process_meeting, queue_meeting
 from app.security import verify_readai_signature
 from app.services.telegram_bot import (
     handle_telegram_update,
@@ -174,10 +175,37 @@ async def readai_webhook(
 
     if settings.is_vercel:
         await queue_meeting(payload)
+        if task_preview.enabled() and not payload.meeting_key.startswith("test-"):
+            await asyncio.to_thread(task_preview.trigger, payload.meeting_key)
         return JSONResponse({"status": "queued", "meeting_id": payload.meeting_key})
 
     background_tasks.add_task(queue_meeting, payload)
     return JSONResponse({"status": "queued", "meeting_id": payload.meeting_key})
+
+
+@app.post("/internal/task-preview")
+async def internal_task_preview(
+    request: Request,
+    x_internal_token: Optional[str] = Header(default=None, alias="X-Internal-Token"),
+) -> JSONResponse:
+    import hmac
+
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, task_preview.internal_token()):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    meeting_id = (await request.json()).get("meeting_id", "")
+    try:
+        payload = load_pending_payload(meeting_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not task_preview.claim(payload.meeting_key):
+        return JSONResponse({"status": "already_sent"})
+    try:
+        people = await asyncio.to_thread(task_preview.build_and_send, payload)
+    except Exception:
+        task_preview.release(payload.meeting_key)
+        logger.exception("Превью задач упало для %s", payload.meeting_key)
+        raise
+    return JSONResponse({"status": "sent", "people": people})
 
 
 @app.post("/webhooks/telegram")
