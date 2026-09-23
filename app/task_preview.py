@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 SENT_PREFIX = "digest:sent:"
 CLEAN_PREFIX = "digest:transcript:"
+CHATS_KEY = "digest:chats"
 TTL_SECONDS = 60 * 60 * 24 * 60
 DEFAULT_SKIP = r"daily|дейл|дэйл|standup|стендап|планёрка|планерка"
 
@@ -59,8 +60,35 @@ def enabled() -> bool:
 
 
 def chat_ids() -> List[str]:
+    """Получатели: из env плюс чаты, куда бота добавили (он запоминает их сам)."""
     raw = os.getenv("TASK_PREVIEW_CHAT_IDS", "")
-    return [c for c in raw.replace(",", " ").split() if c.lstrip("-").isdigit()]
+    ids = [c for c in raw.replace(",", " ").split() if c.lstrip("-").isdigit()]
+    r = _redis()
+    if r is not None:
+        try:
+            ids += [c for c in r.smembers(CHATS_KEY) if c not in ids]
+        except Exception:
+            logger.exception("Не прочитались чаты-получатели")
+    return ids
+
+
+def remember_chat(update: dict) -> None:
+    """Бота добавили в чат или удалили из него — обновляем список получателей."""
+    member = update.get("my_chat_member") or {}
+    chat = member.get("chat") or {}
+    status = (member.get("new_chat_member") or {}).get("status")
+    if not chat.get("id") or not status:
+        return
+    r = _redis()
+    if r is None:
+        return
+    if status in {"member", "administrator", "creator"}:
+        r.sadd(CHATS_KEY, str(chat["id"]))
+        _send(str(chat["id"]), "Готово. Сюда будут приходить итоги всех звонков: проект, краткое саммари и задачи. Дейлики не присылаю. Финансы и юридическое вырезаны.")
+        logger.info("Чат %s (%s) добавлен в получатели", chat["id"], chat.get("title"))
+    else:
+        r.srem(CHATS_KEY, str(chat["id"]))
+        logger.info("Чат %s убран из получателей", chat["id"])
 
 
 def is_skipped(title: str) -> bool:

@@ -224,6 +224,8 @@ async def tasks_bot_webhook(
         raise HTTPException(status_code=403, detail="Forbidden")
     if update.get("callback_query"):
         await asyncio.to_thread(task_preview.handle_callback, update)
+    elif update.get("my_chat_member"):
+        await asyncio.to_thread(task_preview.remember_chat, update)
     return JSONResponse({"ok": True})
 
 
