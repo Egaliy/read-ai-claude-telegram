@@ -1,63 +1,59 @@
-"""Задачи по людям после каждой встречи → превью в отдельного бота (TASKS_BOT_TOKEN).
+"""Дайджест звонка для всей команды: проект, один абзац саммари, задачи, кнопка «Полный транскрипт».
 
-Пока получатели — только TASK_PREVIEW_CHAT_IDS (руководство): видно, что получит каждый исполнитель.
-Бриф строится той же нейронкой и промптом, что и основной бриф; затем второй запрос делит задачи по людям.
+Уходит в отдельного бота (TASKS_BOT_TOKEN) всем получателям из TASK_PREVIEW_CHAT_IDS.
+Дейлики пропускаются (DIGEST_SKIP_TITLES). Финансы и юридическое вырезаются и из дайджеста,
+и из транскрипта, который отдаётся по кнопке.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
-from typing import List
+import re
+from typing import List, Optional
 
 import anthropic
 import httpx
 
 from app.config import settings
 from app.models import ReadAIWebhookPayload
-from app.services.claude import extract_meeting_brief
 from app.services.transcript import build_claude_source_text
 
 logger = logging.getLogger(__name__)
 
-SENT_PREFIX = "taskpreview:sent:"
-SENT_TTL_SECONDS = 60 * 60 * 24 * 30
+SENT_PREFIX = "digest:sent:"
+CLEAN_PREFIX = "digest:transcript:"
+TTL_SECONDS = 60 * 60 * 24 * 60
+DEFAULT_SKIP = r"daily|дейл|дэйл|standup|стендап|планёрка|планерка"
 
-SCHEMA = {
+DIGEST_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["people"],
+    "required": ["project", "summary", "tasks"],
     "properties": {
-        "people": {
+        "project": {"type": "string"},
+        "summary": {"type": "string"},
+        "tasks": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["name", "tasks"],
+                "required": ["title", "emoji", "due"],
                 "properties": {
-                    "name": {"type": "string"},
-                    "tasks": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["title", "emoji", "due"],
-                            "properties": {
-                                "title": {"type": "string"},
-                                "emoji": {"type": "string"},
-                                "due": {"type": "string"},
-                            },
-                        },
-                    },
+                    "title": {"type": "string"},
+                    "emoji": {"type": "string"},
+                    "due": {"type": "string"},
                 },
             },
-        }
+        },
     },
 }
 
 
+# ---------- настройки ----------
 def enabled() -> bool:
     return bool(os.getenv("TASKS_BOT_TOKEN") and chat_ids())
 
@@ -67,10 +63,19 @@ def chat_ids() -> List[str]:
     return [c for c in raw.replace(",", " ").split() if c.lstrip("-").isdigit()]
 
 
+def is_skipped(title: str) -> bool:
+    """Дейлики и планёрки в общий бот не идут."""
+    return bool(re.search(os.getenv("DIGEST_SKIP_TITLES", DEFAULT_SKIP), title or "", re.I))
+
+
 def internal_token() -> str:
-    """Токен для внутреннего вызова /internal/task-preview — выводится из ключа вебхука."""
     key = (settings.readai_webhook_signing_key or "").encode()
     return hmac.new(key, b"task-preview", hashlib.sha256).hexdigest()
+
+
+def webhook_secret() -> str:
+    token = (os.getenv("TASKS_BOT_TOKEN") or "").encode()
+    return hmac.new(token, b"tasks-bot-webhook", hashlib.sha256).hexdigest()[:48]
 
 
 def _redis():
@@ -81,11 +86,10 @@ def _redis():
 
 
 def claim(meeting_id: str) -> bool:
-    """True, если превью по встрече ещё не отправлялось (и помечает его отправленным)."""
     r = _redis()
     if r is None:
         return True
-    return bool(r.set(SENT_PREFIX + meeting_id, "1", nx=True, ex=SENT_TTL_SECONDS))
+    return bool(r.set(SENT_PREFIX + meeting_id, "1", nx=True, ex=TTL_SECONDS))
 
 
 def release(meeting_id: str) -> None:
@@ -94,59 +98,124 @@ def release(meeting_id: str) -> None:
         r.delete(SENT_PREFIX + meeting_id)
 
 
-def split_by_person(brief: str, transcript: str) -> list:
-    system = (settings.prompt_path.parent / "tasks_by_person.txt").read_text(encoding="utf-8")
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    msg = client.messages.create(
+# ---------- Claude ----------
+def _client() -> anthropic.Anthropic:
+    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+
+def _prompt(name: str) -> str:
+    return (settings.prompt_path.parent / name).read_text(encoding="utf-8")
+
+
+def build_digest(title: str, transcript: str) -> dict:
+    msg = _client().messages.create(
         model=settings.claude_model,
         max_tokens=8192,
-        system=system,
-        output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-        messages=[{"role": "user", "content": f"BRIEF:\n{brief}\n\nTRANSCRIPT:\n{transcript}"}],
+        system=_prompt("meeting_digest.txt"),
+        output_config={"format": {"type": "json_schema", "schema": DIGEST_SCHEMA}},
+        messages=[{"role": "user", "content": f"MEETING TITLE: {title}\n\nTRANSCRIPT:\n{transcript}"}],
     )
-    text = "".join(b.text for b in msg.content if b.type == "text")
-    return json.loads(text)["people"]
+    return json.loads("".join(b.text for b in msg.content if b.type == "text"))
 
 
-def render(title: str, date: str, tasks: list) -> str:
-    lines = [f"🗂 Ваши задачи · {title}", f"📅 {date}", ""]
-    for t in tasks:
-        due = t.get("due", "").strip()
-        lines.append(f"{t.get('emoji') or '▫️'} {t['title']}" + (f"  ⏰ {due}" if due else ""))
+def clean_transcript(transcript: str) -> str:
+    msg = _client().messages.create(
+        model=settings.claude_model,
+        max_tokens=32000,
+        system=_prompt("transcript_redaction.txt"),
+        messages=[{"role": "user", "content": transcript}],
+    )
+    return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+
+def cached_clean_transcript(meeting_id: str, transcript: str) -> str:
+    r = _redis()
+    if r is not None:
+        cached = r.get(CLEAN_PREFIX + meeting_id)
+        if cached:
+            return cached
+    cleaned = clean_transcript(transcript)
+    if r is not None:
+        r.set(CLEAN_PREFIX + meeting_id, cleaned, ex=TTL_SECONDS)
+    return cleaned
+
+
+# ---------- Telegram ----------
+def _api(method: str, payload: dict, files=None):
+    token = os.getenv("TASKS_BOT_TOKEN")
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    if files:
+        return httpx.post(url, data=payload, files=files, timeout=60)
+    return httpx.post(url, json=payload, timeout=30)
+
+
+def _send(chat: str, text: str, markup: Optional[dict] = None) -> None:
+    body = {"chat_id": chat, "text": text[:4000], "link_preview_options": {"is_disabled": True}}
+    if markup:
+        body["reply_markup"] = markup
+    res = _api("sendMessage", body)
+    if res.status_code != 200:
+        logger.error("Дайджест не отправился в %s: %s", chat, res.text[:200])
+
+
+def format_digest(payload: ReadAIWebhookPayload, digest: dict) -> str:
+    date = (payload.start_time or "")[:10]
+    lines = [f"📞 {digest['project']} · {date}", "", digest["summary"].strip()]
+    if digest.get("tasks"):
+        lines += ["", "Задачи:"]
+        for t in digest["tasks"]:
+            due = (t.get("due") or "").strip()
+            lines.append(f"{t.get('emoji') or '▫️'} {t['title']}" + (f"  ⏰ {due}" if due else ""))
     return "\n".join(lines)
 
 
-def _send(text: str) -> None:
-    token = os.getenv("TASKS_BOT_TOKEN")
-    for chat in chat_ids():
-        try:
-            httpx.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat, "text": text[:4000]},
-                timeout=30,
-            ).raise_for_status()
-        except Exception:
-            logger.exception("Превью задач: не отправилось в %s", chat)
-
-
-def build_and_send(payload: ReadAIWebhookPayload) -> int:
+def build_and_send(payload: ReadAIWebhookPayload) -> dict:
     title = payload.title or "встреча"
-    date = (payload.start_time or "")[:10]
-    brief = extract_meeting_brief(payload)
-    transcript, _ = build_claude_source_text(payload)
-    people = [p for p in split_by_person(brief, transcript) if p.get("tasks")]
+    if is_skipped(title):
+        logger.info("Дайджест: %s пропущен (дейлик)", title)
+        return {"skipped": True}
 
-    if not people:
-        _send(f"🗂 {title} · {date}\nЗадач на встрече не найдено.")
-        return 0
-    _send(f"🧪 {title} · {date}\nЗадачи по людям — так их увидит каждый. Исполнителей: {len(people)}.")
-    for person in people:
-        _send(f"👤 {person['name']}\n\n" + render(title, date, person["tasks"]))
-    return len(people)
+    transcript, _ = build_claude_source_text(payload)
+    digest = build_digest(title, transcript)
+    text = format_digest(payload, digest)
+    markup = {"inline_keyboard": [[{"text": "📄 Полный транскрипт", "callback_data": f"tr:{payload.meeting_key}"}]]}
+    for chat in chat_ids():
+        _send(chat, text, markup)
+    return {"project": digest["project"], "tasks": len(digest.get("tasks", [])), "chats": len(chat_ids())}
+
+
+def handle_callback(update: dict) -> None:
+    """Кнопка «Полный транскрипт»: отдаём очищенную расшифровку файлом."""
+    from app.pipeline import load_pending_payload
+
+    query = update.get("callback_query") or {}
+    data = str(query.get("data") or "")
+    if not data.startswith("tr:"):
+        return
+    meeting_id = data[3:]
+    chat = str(query.get("message", {}).get("chat", {}).get("id") or "")
+    _api("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "Готовлю транскрипт…"})
+    try:
+        payload = load_pending_payload(meeting_id)
+        transcript, _ = build_claude_source_text(payload)
+        cleaned = cached_clean_transcript(meeting_id, transcript)
+    except Exception:
+        logger.exception("Транскрипт для %s не собрался", meeting_id)
+        _send(chat, "Не получилось собрать транскрипт. Возможно, встреча уже удалена из хранилища.")
+        return
+    name = re.sub(r"[^\w\-. ]+", "", (payload.title or "meeting"))[:50].strip() or "meeting"
+    caption = f"📄 {payload.title or 'Встреча'} · {(payload.start_time or '')[:10]}\nФинансы и юридическое вырезаны."
+    res = _api(
+        "sendDocument",
+        {"chat_id": chat, "caption": caption},
+        files={"document": (f"{name}.txt", io.BytesIO(cleaned.encode("utf-8")), "text/plain")},
+    )
+    if res.status_code != 200:
+        logger.error("Транскрипт не отправился: %s", res.text[:200])
 
 
 def trigger(meeting_id: str) -> None:
-    """Запустить превью отдельным вызовом, чтобы не держать вебхук Read.ai."""
+    """Запустить дайджест отдельным вызовом, чтобы не держать вебхук Read.ai."""
     base = f"https://{settings.vercel_stable_domain}"
     try:
         httpx.post(
@@ -158,4 +227,4 @@ def trigger(meeting_id: str) -> None:
     except httpx.TimeoutException:
         pass  # ожидаемо: вызов продолжает работать сам
     except Exception:
-        logger.exception("Не удалось запустить превью задач для %s", meeting_id)
+        logger.exception("Не удалось запустить дайджест для %s", meeting_id)

@@ -175,7 +175,11 @@ async def readai_webhook(
 
     if settings.is_vercel:
         await queue_meeting(payload)
-        if task_preview.enabled() and not payload.meeting_key.startswith("test-"):
+        if (
+            task_preview.enabled()
+            and not payload.meeting_key.startswith("test-")
+            and not task_preview.is_skipped(payload.title or "")
+        ):
             await asyncio.to_thread(task_preview.trigger, payload.meeting_key)
         return JSONResponse({"status": "queued", "meeting_id": payload.meeting_key})
 
@@ -200,12 +204,27 @@ async def internal_task_preview(
     if not task_preview.claim(payload.meeting_key):
         return JSONResponse({"status": "already_sent"})
     try:
-        people = await asyncio.to_thread(task_preview.build_and_send, payload)
+        result = await asyncio.to_thread(task_preview.build_and_send, payload)
     except Exception:
         task_preview.release(payload.meeting_key)
-        logger.exception("Превью задач упало для %s", payload.meeting_key)
+        logger.exception("Дайджест упал для %s", payload.meeting_key)
         raise
-    return JSONResponse({"status": "sent", "people": people})
+    return JSONResponse({"status": "sent", **result})
+
+
+@app.post("/webhooks/tasks-bot")
+async def tasks_bot_webhook(
+    update: Dict[str, Any],
+    x_telegram_bot_api_secret_token: Optional[str] = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
+) -> JSONResponse:
+    import hmac
+
+    secret = task_preview.webhook_secret()
+    if not x_telegram_bot_api_secret_token or not hmac.compare_digest(x_telegram_bot_api_secret_token, secret):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if update.get("callback_query"):
+        await asyncio.to_thread(task_preview.handle_callback, update)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/webhooks/telegram")

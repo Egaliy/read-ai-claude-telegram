@@ -38,4 +38,4 @@ def latest_meeting(title_part: str) -> ReadAIWebhookPayload:
 if __name__ == "__main__":
     payload = latest_meeting(" ".join(sys.argv[1:]) or "daily")
     print(f"Встреча: {payload.title} · {payload.start_time}")
-    print("Исполнителей:", task_preview.build_and_send(payload))
+    print(task_preview.build_and_send(payload))
