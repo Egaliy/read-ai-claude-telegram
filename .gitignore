@@ -10,3 +10,4 @@ data/
 .vercel
 .DS_Store
 .env*
+.preview/

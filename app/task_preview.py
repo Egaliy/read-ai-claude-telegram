@@ -220,9 +220,12 @@ def _send_document(chat: str, name: str, content: str, mime: str, caption: str =
 def send_transcript(payload: ReadAIWebhookPayload) -> dict:
     """Шаг 2: очищенный транскрипт файлом."""
     transcript, _ = build_claude_source_text(payload)
+    from app.services.transcript_html import to_html
+
     cleaned = cached_clean_transcript(payload.meeting_key, transcript)
+    page = to_html(payload.title or "Встреча", (payload.start_time or "")[:10], cleaned)
     for chat in chat_ids():
-        _send_document(chat, _file_name(payload, "Транскрипт", "txt"), cleaned, "text/plain")
+        _send_document(chat, _file_name(payload, "Транскрипт", "html"), page, "text/html")
     return {"transcript": len(cleaned)}
 
 
