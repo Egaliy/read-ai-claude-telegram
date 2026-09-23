@@ -202,8 +202,9 @@ def format_digest(payload: ReadAIWebhookPayload, digest: dict) -> str:
 
 
 def _file_name(payload: ReadAIWebhookPayload, prefix: str, ext: str) -> str:
-    base = re.sub(r"[^\w\-. ]+", "", payload.title or "meeting").strip().replace(" ", "-")[:50] or "meeting"
-    return f"{prefix}-{base}-{(payload.start_time or '')[:10]}.{ext}"
+    """Имя файла несёт смысл — подписи под файлами не нужны."""
+    base = re.sub(r"[^\w\-. ]+", " ", payload.title or "встреча").strip()[:60] or "встреча"
+    return f"{prefix} — {base} — {(payload.start_time or '')[:10]}.{ext}"
 
 
 def _send_document(chat: str, name: str, content: str, mime: str, caption: str = "") -> None:
@@ -220,9 +221,8 @@ def send_transcript(payload: ReadAIWebhookPayload) -> dict:
     """Шаг 2: очищенный транскрипт файлом."""
     transcript, _ = build_claude_source_text(payload)
     cleaned = cached_clean_transcript(payload.meeting_key, transcript)
-    caption = f"📄 Транскрипт: {payload.title or 'встреча'}\nФинансы и юридическое вырезаны."
     for chat in chat_ids():
-        _send_document(chat, _file_name(payload, "transcript", "txt"), cleaned, "text/plain", caption)
+        _send_document(chat, _file_name(payload, "Транскрипт", "txt"), cleaned, "text/plain")
     return {"transcript": len(cleaned)}
 
 
@@ -246,7 +246,7 @@ def build_and_send(payload: ReadAIWebhookPayload) -> dict:
     try:
         brief_html = markdown_brief_to_html(extract_meeting_brief(payload))
         for chat in chats:
-            _send_document(chat, _file_name(payload, "brief", "html"), brief_html, "text/html", f"📋 Бриф: {title}")
+            _send_document(chat, _file_name(payload, "Бриф", "html"), brief_html, "text/html")
         brief_ok = True
     except Exception:
         logger.exception("Бриф для %s не собрался", payload.meeting_key)
