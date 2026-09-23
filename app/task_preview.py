@@ -147,12 +147,14 @@ def build_digest(title: str, transcript: str) -> dict:
 
 
 def clean_transcript(transcript: str) -> str:
-    msg = _client().messages.create(
+    # Стриминг обязателен: ответ длинный, обычный запрос SDK отклоняет.
+    with _client().messages.stream(
         model=settings.claude_model,
         max_tokens=32000,
         system=_prompt("transcript_redaction.txt"),
         messages=[{"role": "user", "content": transcript}],
-    )
+    ) as stream:
+        msg = stream.get_final_message()
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
@@ -193,7 +195,9 @@ def format_digest(payload: ReadAIWebhookPayload, digest: dict) -> str:
         lines += ["", "Задачи:"]
         for t in digest["tasks"]:
             due = (t.get("due") or "").strip()
-            lines.append(f"{t.get('emoji') or '▫️'} {t['title']}" + (f"  ⏰ {due}" if due else ""))
+            # Модель иногда ставит эмодзи и в начало самой задачи — убираем дубль.
+            title = re.sub(r"^[^\w\d(«\"']+", "", t["title"]).strip()
+            lines.append(f"{t.get('emoji') or '▫️'} {title}" + (f"  ⏰ {due}" if due else ""))
     return "\n".join(lines)
 
 
