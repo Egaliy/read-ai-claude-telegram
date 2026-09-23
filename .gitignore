@@ -9,3 +9,4 @@ __pycache__/
 data/
 .vercel
 .DS_Store
+.env*
