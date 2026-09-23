@@ -196,11 +196,17 @@ async def internal_task_preview(
 
     if not x_internal_token or not hmac.compare_digest(x_internal_token, task_preview.internal_token()):
         raise HTTPException(status_code=403, detail="Forbidden")
-    meeting_id = (await request.json()).get("meeting_id", "")
+    body = await request.json()
+    meeting_id = body.get("meeting_id", "")
+    stage = body.get("stage", "digest")
     try:
         payload = load_pending_payload(meeting_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if stage == "transcript":
+        return JSONResponse({"status": "sent", **await asyncio.to_thread(task_preview.send_transcript, payload)})
+
     if not task_preview.claim(payload.meeting_key):
         return JSONResponse({"status": "already_sent"})
     try:

@@ -201,19 +201,58 @@ def format_digest(payload: ReadAIWebhookPayload, digest: dict) -> str:
     return "\n".join(lines)
 
 
+def _file_name(payload: ReadAIWebhookPayload, prefix: str, ext: str) -> str:
+    base = re.sub(r"[^\w\-. ]+", "", payload.title or "meeting").strip().replace(" ", "-")[:50] or "meeting"
+    return f"{prefix}-{base}-{(payload.start_time or '')[:10]}.{ext}"
+
+
+def _send_document(chat: str, name: str, content: str, mime: str, caption: str = "") -> None:
+    res = _api(
+        "sendDocument",
+        {"chat_id": chat, "caption": caption[:900]},
+        files={"document": (name, io.BytesIO(content.encode("utf-8")), mime)},
+    )
+    if res.status_code != 200:
+        logger.error("Файл %s не отправился в %s: %s", name, chat, res.text[:200])
+
+
+def send_transcript(payload: ReadAIWebhookPayload) -> dict:
+    """Шаг 2: очищенный транскрипт файлом."""
+    transcript, _ = build_claude_source_text(payload)
+    cleaned = cached_clean_transcript(payload.meeting_key, transcript)
+    caption = f"📄 Транскрипт: {payload.title or 'встреча'}\nФинансы и юридическое вырезаны."
+    for chat in chat_ids():
+        _send_document(chat, _file_name(payload, "transcript", "txt"), cleaned, "text/plain", caption)
+    return {"transcript": len(cleaned)}
+
+
 def build_and_send(payload: ReadAIWebhookPayload) -> dict:
+    """Шаг 1: саммари с задачами и бриф .html. Транскрипт уходит следующим вызовом."""
     title = payload.title or "встреча"
     if is_skipped(title):
         logger.info("Дайджест: %s пропущен (дейлик)", title)
         return {"skipped": True}
 
+    from app.services.brief_html import markdown_brief_to_html
+    from app.services.claude import extract_meeting_brief
+
     transcript, _ = build_claude_source_text(payload)
     digest = build_digest(title, transcript)
-    text = format_digest(payload, digest)
-    markup = {"inline_keyboard": [[{"text": "📄 Полный транскрипт", "callback_data": f"tr:{payload.meeting_key}"}]]}
-    for chat in chat_ids():
-        _send(chat, text, markup)
-    return {"project": digest["project"], "tasks": len(digest.get("tasks", [])), "chats": len(chat_ids())}
+    chats = chat_ids()
+    for chat in chats:
+        _send(chat, format_digest(payload, digest))
+
+    brief_ok = False
+    try:
+        brief_html = markdown_brief_to_html(extract_meeting_brief(payload))
+        for chat in chats:
+            _send_document(chat, _file_name(payload, "brief", "html"), brief_html, "text/html", f"📋 Бриф: {title}")
+        brief_ok = True
+    except Exception:
+        logger.exception("Бриф для %s не собрался", payload.meeting_key)
+
+    trigger(payload.meeting_key, stage="transcript")
+    return {"project": digest["project"], "tasks": len(digest.get("tasks", [])), "brief": brief_ok, "chats": len(chats)}
 
 
 def handle_callback(update: dict) -> None:
@@ -246,13 +285,13 @@ def handle_callback(update: dict) -> None:
         logger.error("Транскрипт не отправился: %s", res.text[:200])
 
 
-def trigger(meeting_id: str) -> None:
-    """Запустить дайджест отдельным вызовом, чтобы не держать вебхук Read.ai."""
+def trigger(meeting_id: str, stage: str = "digest") -> None:
+    """Запустить шаг отдельным вызовом, чтобы уложиться в лимит времени функции."""
     base = f"https://{settings.vercel_stable_domain}"
     try:
         httpx.post(
             f"{base}/internal/task-preview",
-            json={"meeting_id": meeting_id},
+            json={"meeting_id": meeting_id, "stage": stage},
             headers={"x-internal-token": internal_token()},
             timeout=3,
         )
