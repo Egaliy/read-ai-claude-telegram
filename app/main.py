@@ -204,8 +204,12 @@ async def internal_task_preview(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    if stage in {"transcript", "brief"}:
-        worker = task_preview.send_transcript if stage == "transcript" else task_preview.send_brief
+    if stage in {"transcript", "brief", "chronicle"}:
+        worker = {
+            "transcript": task_preview.send_transcript,
+            "brief": task_preview.send_brief,
+            "chronicle": task_preview.record_chronicle,
+        }[stage]
         return JSONResponse({"status": "sent", **await asyncio.to_thread(worker, payload)})
 
     if not task_preview.claim(payload.meeting_key):

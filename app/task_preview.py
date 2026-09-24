@@ -188,6 +188,18 @@ def _prompt(name: str) -> str:
     return (settings.prompt_path.parent / name).read_text(encoding="utf-8")
 
 
+def json_call(system: str, schema: dict, prompt: str, max_tokens: int = 8000) -> dict:
+    """Ответ модели строго по схеме — для шагов, где результат разбирает код."""
+    msg = _client().messages.create(
+        model=settings.claude_model,
+        max_tokens=max_tokens,
+        system=system,
+        output_config={"format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return json.loads("".join(b.text for b in msg.content if b.type == "text"))
+
+
 def build_digest(title: str, transcript: str) -> dict:
     msg = _client().messages.create(
         model=settings.claude_model,
@@ -365,11 +377,24 @@ def send_brief(payload: ReadAIWebhookPayload) -> dict:
     for chat in brief_chat_ids():
         _send_document(chat, _file_name(payload, "Бриф", "html"), doc, "text/html")
         _send_document(chat, _file_name(payload, "Транскрипт", "html"), transcript_page, "text/html")
+    trigger(payload.meeting_key, stage="chronicle")
     return {
         "project": digest["project"],
         "tasks": len(digest.get("tasks", [])),
         "chats": len(chats),
     }
+
+
+def record_chronicle(payload: ReadAIWebhookPayload) -> dict:
+    """Шаг летописи в Notion. Ошибки не должны влиять на уже отправленные сообщения."""
+    from app import chronicle
+
+    transcript, _ = build_claude_source_text(payload)
+    try:
+        return chronicle.record_call(payload, transcript)
+    except Exception as exc:
+        logger.exception("Летопись для %s не записалась", payload.meeting_key)
+        return {"error": str(exc)[:200]}
 
 
 def trigger(meeting_id: str, stage: str = "digest") -> None:
