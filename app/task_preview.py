@@ -116,10 +116,14 @@ def mention(name: str) -> str:
     key = name.strip().lower()
     person = known.get(key)
     if person is None:
-        for k, v in known.items():  # «Владислав Сухов» ↔ «Влад»
-            if k.startswith(key) or key.startswith(k) or key in k.split():
-                person = v
-                break
+        # «Владислав Сухов» ↔ «Влад». Если имя подходит нескольким людям
+        # (в студии двое Коль), не тегаем никого — безопаснее оставить имя.
+        matches = {
+            v["username"]: v
+            for k, v in known.items()
+            if k.startswith(key) or key.startswith(k) or key in k.split()
+        }
+        person = next(iter(matches.values())) if len(matches) == 1 else None
     if person and person.get("username"):
         return "@" + person["username"]
     return name
