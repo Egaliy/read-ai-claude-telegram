@@ -47,20 +47,41 @@ Part 2 — sanitized transcript:
 - do not replace the transcript with a retelling; keep the original language of speech;
 - end with «Итог звонка»: 1–2 short paragraphs on the main outcome, the client's explicitly expressed reaction, the agreed direction and the unresolved questions. Describe the impression through the content of the conversation; never write «клиент доволен» unless the source supports it; add no new facts or recommendations.
 
-## OUTPUT — one complete HTML document
+## OUTPUT — Markdown, in Russian
 
-Return only the finished HTML: `<!doctype html>` … `</html>`, with embedded CSS, no markdown fences and no commentary. Everything in Russian except quotations, which keep their original language.
+```
+# <Проект> — <о чём звонок в 2–4 словах>
 
-Design:
-- clean white background, restrained palette, modern readable sans-serif (system fonts only — no external fonts or scripts);
-- content column about 760px, body text 16–17px with generous line height;
-- clear hierarchy: document title, section headings, topic headings, body;
-- group related feedback in cards with subtle borders or very light backgrounds; keep each item together with its status, reason and open question;
-- status shown as a small text label, never by colour alone;
-- bold used sparingly — headings, short labels, confirmed decisions; quotations and timestamps visually secondary;
-- no decorative clutter, no repeated arrows, no emoji, no technical labels;
-- the sanitized transcript is clearly separated from the brief: each speaker's turn on a new line, name in bold, timestamps muted, neutral topic headings where the subject changes, original order kept;
-- «Итог звонка» is a distinct, softly highlighted block at the end;
-- comfortable to read on desktop and mobile.
+## Главное
+2–4 предложения о сути звонка и его исходе.
 
-Escape any source text so it cannot be interpreted as HTML or code. The result should feel like a carefully edited studio document: clear, calm and easy to scan.
+## Обратная связь и решения
+### <Экран, элемент или поток>
+Что: суть комментария или решения, конкретно и исполнимо.
+Почему: названная причина или желаемый результат. Строку пропустить, если причина не прозвучала.
+Статус: договорились / клиент попросил / предложили / отклонили / остаётся открытым / выполнено. В скобках тайм-код для ключевых и спорных мест, например (1:03).
+Кто: имя, если прозвучало.
+
+## Ещё обсуждается
+### <Тема>
+Что обсуждали и к чему склонялись. Не подавать как задачу.
+
+## Чего не хватает
+### <Чего именно>
+От кого ждём и что это блокирует, если это было сказано.
+
+## Следующие шаги
+### <Действие>
+Кто: имя или «не указано».
+Срок: как прозвучал, или «не указан».
+Статус: договорились / планирует / взял обязательство.
+
+## Итог звонка
+1–2 коротких абзаца: главный исход, явно выраженная реакция клиента, согласованное направление, нерешённые вопросы. Впечатление — через содержание разговора; не писать «клиент доволен», если этого нет в источнике. Никаких новых фактов и рекомендаций.
+```
+
+ОБЪЁМ — жёстко: весь бриф не длиннее 6000 знаков. «Обратная связь и решения» — не больше 12 самых важных блоков, мелкие правки объединяй в один блок по экрану. «Ещё обсуждается», «Чего не хватает», «Следующие шаги» — не больше 5 блоков каждый. Строка — одно предложение, максимум два.
+
+Разделов без содержания быть не должно — пропускай их целиком. Не повторяй один и тот же факт в разных разделах. Никаких эмодзи, стрелок и служебных пометок.
+
+Очищенный транскрипт к документу добавляется отдельно, тебе его писать не нужно.

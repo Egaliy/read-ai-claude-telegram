@@ -150,7 +150,7 @@ def build_brief(title: str, transcript: str) -> str:
     """Документ по звонку целиком: бриф + очищенный транскрипт с итогом. Модель отдаёт готовый HTML."""
     with _client().messages.stream(
         model=settings.claude_model,
-        max_tokens=32000,
+        max_tokens=8000,
         system=_prompt("brief_document.txt"),
         messages=[{"role": "user", "content": f"TRANSCRIPT ({title}):\n{transcript}"}],
     ) as stream:
@@ -165,16 +165,37 @@ def brief_chat_ids() -> List[str]:
     return [c for c in raw.replace(",", " ").split() if c.lstrip("-").isdigit()]
 
 
-def clean_transcript(transcript: str) -> str:
+def _clean_chunk(chunk: str) -> str:
     # Стриминг обязателен: ответ длинный, обычный запрос SDK отклоняет.
     with _client().messages.stream(
         model=settings.claude_model,
-        max_tokens=32000,
+        max_tokens=16000,
         system=_prompt("transcript_redaction.txt"),
-        messages=[{"role": "user", "content": transcript}],
+        messages=[{"role": "user", "content": chunk}],
     ) as stream:
         msg = stream.get_final_message()
     return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+
+def clean_transcript(transcript: str, chunk_chars: int = 12000) -> str:
+    """Длинный транскрипт режем на куски по репликам и чистим параллельно — иначе не уложиться в лимит времени."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    chunks: List[str] = []
+    current = ""
+    for para in transcript.split("\n\n"):
+        if current and len(current) + len(para) > chunk_chars:
+            chunks.append(current)
+            current = ""
+        current += para + "\n\n"
+    if current.strip():
+        chunks.append(current)
+
+    if len(chunks) < 2:
+        return _clean_chunk(transcript)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        parts = list(pool.map(_clean_chunk, chunks))
+    return "\n".join(p for p in parts if p)
 
 
 def cached_clean_transcript(meeting_id: str, transcript: str) -> str:
@@ -245,6 +266,7 @@ def send_transcript(payload: ReadAIWebhookPayload) -> dict:
     page = to_html(payload.title or "Встреча", (payload.start_time or "")[:10], cleaned)
     for chat in chat_ids():
         _send_document(chat, _file_name(payload, "Транскрипт", "html"), page, "text/html")
+    trigger(payload.meeting_key, stage="brief")  # документу транскрипт уже готов в кеше
     return {"transcript": len(cleaned)}
 
 
@@ -264,15 +286,21 @@ def build_and_send(payload: ReadAIWebhookPayload) -> dict:
         _send(chat, format_digest(payload, digest))
 
     # Документ и транскрипт — отдельными вызовами: в один лимит времени функции они не укладываются.
-    trigger(payload.meeting_key, stage="brief")
     trigger(payload.meeting_key, stage="transcript")
     return {"project": digest["project"], "tasks": len(digest.get("tasks", [])), "chats": len(chats)}
 
 
 def send_brief(payload: ReadAIWebhookPayload) -> dict:
     """Документ с брифом и очищенным транскриптом — в личку руководителю."""
+    from app.services import brief_doc
+
     transcript, _ = build_claude_source_text(payload)
-    html_doc = build_brief(payload.title or "встреча", transcript)
+    brief_md = build_brief(payload.title or "встреча", transcript)
+    cleaned = cached_clean_transcript(payload.meeting_key, transcript)
+    participants = ", ".join(sorted({n for n, _ in __import__("app.services.transcript_html", fromlist=["parse"]).parse(cleaned)}))
+    html_doc = brief_doc.build(
+        payload.title or "Встреча", (payload.start_time or "")[:10], participants, brief_md, cleaned
+    )
     chats = brief_chat_ids()
     for chat in chats:
         _send_document(chat, _file_name(payload, "Бриф", "html"), html_doc, "text/html")

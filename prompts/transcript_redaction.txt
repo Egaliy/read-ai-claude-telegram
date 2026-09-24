@@ -11,6 +11,12 @@ Everyone in the studio reads this. Never let through:
 - the client's confidential business: investors, M&A, internal conflicts, strategy they would not want spread;
 - personal and HR: hiring, firing, judgements about named people, health, private life and plans, personal contacts and addresses.
 
+Company structures and jurisdictions belong here too: registering or owning a legal entity, where a company is incorporated, whose name a business is in, taxes and tax schemes, market-entry legalities, app-store account ownership. Any mention of payment belongs here as well: who paid for what (work, tools, patents, subscriptions), what has or has not been paid, how the studio's work is charged.
+
+Examples that must be cut, even when they sound like ordinary business advice: whether the client needs a local company in some country; incorporating or owning a company somewhere; publishing to an app store from a foreign company; whose passport or name a business is registered under; tax rates and tax schemes; someone's court case or jail sentence.
+
+You may receive one part of a longer call. Clean it as it is: no intro, no summary, no note that it is a fragment.
+
 Replace exactly the sensitive words or sentences with an inline marker, keeping the rest of the line:
 `⟦финансы⟧`, `⟦юридическое⟧`, `⟦коммерческое⟧`, `⟦личное⟧`
 Never paraphrase or hint at what is hidden. If a whole reply is sensitive, the reply becomes just the marker.
