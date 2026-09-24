@@ -271,70 +271,33 @@ def send_transcript(payload: ReadAIWebhookPayload) -> dict:
 
 
 def build_and_send(payload: ReadAIWebhookPayload) -> dict:
-    """Шаг 1: саммари с задачами и бриф .html. Транскрипт уходит следующим вызовом."""
-    title = payload.title or "встреча"
-    if is_skipped(title):
-        logger.info("Дайджест: %s пропущен (дейлик)", title)
+    """Единственный шаг после вебхука: собрать документ и отправить в личку."""
+    if is_skipped(payload.title or ""):
+        logger.info("Документ: %s пропущен (дейлик)", payload.title)
         return {"skipped": True}
-
-
-
-    transcript, _ = build_claude_source_text(payload)
-    digest = build_digest(title, transcript)
-    chats = chat_ids()
-    for chat in chats:
-        _send(chat, format_digest(payload, digest))
-
-    # Документ и транскрипт — отдельными вызовами: в один лимит времени функции они не укладываются.
-    trigger(payload.meeting_key, stage="transcript")
-    return {"project": digest["project"], "tasks": len(digest.get("tasks", [])), "chats": len(chats)}
+    return send_brief(payload)
 
 
 def send_brief(payload: ReadAIWebhookPayload) -> dict:
-    """Документ с брифом и очищенным транскриптом — в личку руководителю."""
-    from app.services import brief_doc
+    """Документ по звонку — только в личку (BRIEF_CHAT_IDS). Бриф и транскрипт считаются параллельно."""
+    from concurrent.futures import ThreadPoolExecutor
 
+    from app.services import brief_doc
+    from app.services.transcript_html import parse
+
+    title = payload.title or "встреча"
     transcript, _ = build_claude_source_text(payload)
-    brief_md = build_brief(payload.title or "встреча", transcript)
-    cleaned = cached_clean_transcript(payload.meeting_key, transcript)
-    participants = ", ".join(sorted({n for n, _ in __import__("app.services.transcript_html", fromlist=["parse"]).parse(cleaned)}))
-    html_doc = brief_doc.build(
-        payload.title or "Встреча", (payload.start_time or "")[:10], participants, brief_md, cleaned
-    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        brief_task = pool.submit(build_brief, title, transcript)
+        clean_task = pool.submit(cached_clean_transcript, payload.meeting_key, transcript)
+        brief_md, cleaned = brief_task.result(), clean_task.result()
+
+    participants = ", ".join(sorted({n for n, _ in parse(cleaned)}))
+    html_doc = brief_doc.build(title, (payload.start_time or "")[:10], participants, brief_md, cleaned)
     chats = brief_chat_ids()
     for chat in chats:
         _send_document(chat, _file_name(payload, "Бриф", "html"), html_doc, "text/html")
     return {"brief": len(html_doc), "chats": len(chats)}
-
-
-def handle_callback(update: dict) -> None:
-    """Кнопка «Полный транскрипт»: отдаём очищенную расшифровку файлом."""
-    from app.pipeline import load_pending_payload
-
-    query = update.get("callback_query") or {}
-    data = str(query.get("data") or "")
-    if not data.startswith("tr:"):
-        return
-    meeting_id = data[3:]
-    chat = str(query.get("message", {}).get("chat", {}).get("id") or "")
-    _api("answerCallbackQuery", {"callback_query_id": query.get("id"), "text": "Готовлю транскрипт…"})
-    try:
-        payload = load_pending_payload(meeting_id)
-        transcript, _ = build_claude_source_text(payload)
-        cleaned = cached_clean_transcript(meeting_id, transcript)
-    except Exception:
-        logger.exception("Транскрипт для %s не собрался", meeting_id)
-        _send(chat, "Не получилось собрать транскрипт. Возможно, встреча уже удалена из хранилища.")
-        return
-    name = re.sub(r"[^\w\-. ]+", "", (payload.title or "meeting"))[:50].strip() or "meeting"
-    caption = f"📄 {payload.title or 'Встреча'} · {(payload.start_time or '')[:10]}\nФинансы и юридическое вырезаны."
-    res = _api(
-        "sendDocument",
-        {"chat_id": chat, "caption": caption},
-        files={"document": (f"{name}.txt", io.BytesIO(cleaned.encode("utf-8")), "text/plain")},
-    )
-    if res.status_code != 200:
-        logger.error("Транскрипт не отправился: %s", res.text[:200])
 
 
 def trigger(meeting_id: str, stage: str = "digest") -> None:
