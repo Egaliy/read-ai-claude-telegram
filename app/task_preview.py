@@ -42,11 +42,12 @@ DIGEST_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["title", "emoji", "due"],
+                "required": ["title", "emoji", "due", "assignee"],
                 "properties": {
                     "title": {"type": "string"},
                     "emoji": {"type": "string"},
                     "due": {"type": "string"},
+                    "assignee": {"type": "string", "description": "Имя исполнителя, как прозвучало на звонке. Пустая строка, если не ясно, кто делает."},
                 },
             },
         },
@@ -89,6 +90,54 @@ def remember_chat(update: dict) -> None:
     else:
         r.srem(CHATS_KEY, str(chat["id"]))
         logger.info("Чат %s убран из получателей", chat["id"])
+
+
+PEOPLE_KEY = "digest:people"
+
+
+def remember_person(name: str, username: str = "", user_id: str = "") -> None:
+    r = _redis()
+    if r is not None and name:
+        r.hset(PEOPLE_KEY, name.strip().lower(), json.dumps({"username": username, "id": user_id}))
+
+
+def people() -> dict:
+    r = _redis()
+    if r is None:
+        return {}
+    return {k: json.loads(v) for k, v in (r.hgetall(PEOPLE_KEY) or {}).items()}
+
+
+def mention(name: str) -> str:
+    """«Влад» → @vlad, если человек привязан командой /tag. Иначе имя как есть."""
+    if not name:
+        return ""
+    known = people()
+    key = name.strip().lower()
+    person = known.get(key)
+    if person is None:
+        for k, v in known.items():  # «Владислав Сухов» ↔ «Влад»
+            if k.startswith(key) or key.startswith(k) or key in k.split():
+                person = v
+                break
+    if person and person.get("username"):
+        return "@" + person["username"]
+    return name
+
+
+def remember_chat_admins(chat: str) -> None:
+    """Администраторов чата Telegram отдаёт ботам — забираем их имена сразу. Остальных привязывают /tag."""
+    try:
+        res = _api("getChatAdministrators", {"chat_id": chat}).json()
+    except Exception:
+        logger.exception("Не получил админов чата %s", chat)
+        return
+    for item in res.get("result", []) if res.get("ok") else []:
+        user = item.get("user") or {}
+        if user.get("is_bot") or not user.get("username"):
+            continue
+        for name in {user.get("first_name", ""), f"{user.get('first_name','')} {user.get('last_name','')}".strip()}:
+            remember_person(name, user["username"], str(user["id"]))
 
 
 def is_skipped(title: str) -> bool:
@@ -162,7 +211,8 @@ def build_brief(title: str, transcript: str) -> str:
 def brief_chat_ids() -> List[str]:
     """Документ с брифом уходит только сюда (личка руководителя), не в общий чат."""
     raw = os.getenv("BRIEF_CHAT_IDS", "")
-    return [c for c in raw.replace(",", " ").split() if c.lstrip("-").isdigit()]
+    ids = [c for c in raw.replace(",", " ").split() if c.lstrip("-").isdigit()]
+    return ids or chat_ids()
 
 
 def _clean_chunk(chunk: str) -> str:
@@ -237,7 +287,12 @@ def format_digest(payload: ReadAIWebhookPayload, digest: dict) -> str:
             due = (t.get("due") or "").strip()
             # Модель иногда ставит эмодзи и в начало самой задачи — убираем дубль.
             title = re.sub(r"^[^\w\d(«\"']+", "", t["title"]).strip()
-            lines.append(f"{t.get('emoji') or '▫️'} {title}" + (f"  ⏰ {due}" if due else ""))
+            who = mention((t.get("assignee") or "").strip())
+            lines.append(
+                f"{t.get('emoji') or '▫️'} {title}"
+                + (f" — {who}" if who else "")
+                + (f"  ⏰ {due}" if due else "")
+            )
     return "\n".join(lines)
 
 
@@ -271,33 +326,46 @@ def send_transcript(payload: ReadAIWebhookPayload) -> dict:
 
 
 def build_and_send(payload: ReadAIWebhookPayload) -> dict:
-    """Единственный шаг после вебхука: собрать документ и отправить в личку."""
+    """Один шаг после вебхука: сообщение с задачами, затем бриф и транскрипт файлами."""
     if is_skipped(payload.title or ""):
-        logger.info("Документ: %s пропущен (дейлик)", payload.title)
+        logger.info("Звонок %s пропущен (дейлик)", payload.title)
         return {"skipped": True}
     return send_brief(payload)
 
 
 def send_brief(payload: ReadAIWebhookPayload) -> dict:
-    """Документ по звонку — только в личку (BRIEF_CHAT_IDS). Бриф и транскрипт считаются параллельно."""
+    """Сообщение с задачами + два документа: бриф и транскрипт. Всё считается параллельно."""
     from concurrent.futures import ThreadPoolExecutor
 
     from app.services import brief_doc
-    from app.services.transcript_html import parse
+    from app.services.transcript_html import parse, to_html
 
     title = payload.title or "встреча"
     transcript, _ = build_claude_source_text(payload)
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        digest_task = pool.submit(build_digest, title, transcript)
         brief_task = pool.submit(build_brief, title, transcript)
         clean_task = pool.submit(cached_clean_transcript, payload.meeting_key, transcript)
-        brief_md, cleaned = brief_task.result(), clean_task.result()
+        digest, brief_md, cleaned = digest_task.result(), brief_task.result(), clean_task.result()
 
+    date = (payload.start_time or "")[:10]
     participants = ", ".join(sorted({n for n, _ in parse(cleaned)}))
-    html_doc = brief_doc.build(title, (payload.start_time or "")[:10], participants, brief_md, cleaned)
-    chats = brief_chat_ids()
+    doc = brief_doc.build(title, date, participants, brief_md, cleaned)
+    transcript_page = to_html(title, date, cleaned)
+
+    chats = chat_ids()
     for chat in chats:
-        _send_document(chat, _file_name(payload, "Бриф", "html"), html_doc, "text/html")
-    return {"brief": len(html_doc), "chats": len(chats)}
+        if chat.startswith("-"):
+            remember_chat_admins(chat)
+        _send(chat, format_digest(payload, digest))
+    for chat in brief_chat_ids():
+        _send_document(chat, _file_name(payload, "Бриф", "html"), doc, "text/html")
+        _send_document(chat, _file_name(payload, "Транскрипт", "html"), transcript_page, "text/html")
+    return {
+        "project": digest["project"],
+        "tasks": len(digest.get("tasks", [])),
+        "chats": len(chats),
+    }
 
 
 def trigger(meeting_id: str, stage: str = "digest") -> None:

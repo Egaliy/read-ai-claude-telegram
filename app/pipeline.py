@@ -97,7 +97,14 @@ async def queue_meeting(payload: ReadAIWebhookPayload) -> None:
             pending_store.save(alias, _serialize_payload(payload))
     logger.info("Созвон %s сохранён в очередь", meeting_id)
 
-    # Только уведомление с кнопкой. Claude и .html — по нажатию «Получить бриф».
+    # Старое уведомление «Прошёл созвон» с кнопками отключено: вместо него приходит
+    # сообщение с задачами и два документа (app/task_preview.py).
+    from app import task_preview
+
+    if task_preview.enabled():
+        logger.info("Старое уведомление по %s пропущено — работает новый формат", meeting_id)
+        return
+
     if notified_store.is_notified(meeting_id):
         logger.info("Уведомление для %s уже отправлялось", meeting_id)
         return

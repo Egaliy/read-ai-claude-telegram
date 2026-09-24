@@ -86,6 +86,11 @@ async def handle_telegram_update(update: Dict[str, Any]) -> None:
     if not message:
         return
 
+    from app import task_preview
+
+    if await asyncio.to_thread(task_preview.handle_command, update):
+        return
+
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
     text = (message.get("text") or "").strip()
