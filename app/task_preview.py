@@ -146,6 +146,19 @@ def build_digest(title: str, transcript: str) -> dict:
     return json.loads("".join(b.text for b in msg.content if b.type == "text"))
 
 
+def build_brief(title: str, transcript: str) -> str:
+    """Подробный бриф по звонку: решения, причины, статусы, чего не хватает."""
+    with _client().messages.stream(
+        model=settings.claude_model,
+        max_tokens=16000,
+        system=_prompt("meeting_brief_v2.txt"),
+        messages=[{"role": "user", "content": f"TRANSCRIPT ({title}):\n{transcript}"}],
+    ) as stream:
+        msg = stream.get_final_message()
+    text = "".join(b.text for b in msg.content if b.type == "text").strip()
+    return re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", text).strip()
+
+
 def clean_transcript(transcript: str) -> str:
     # Стриминг обязателен: ответ длинный, обычный запрос SDK отклоняет.
     with _client().messages.stream(
@@ -237,7 +250,6 @@ def build_and_send(payload: ReadAIWebhookPayload) -> dict:
         return {"skipped": True}
 
     from app.services.brief_html import markdown_brief_to_html
-    from app.services.claude import extract_meeting_brief
 
     transcript, _ = build_claude_source_text(payload)
     digest = build_digest(title, transcript)
@@ -247,7 +259,7 @@ def build_and_send(payload: ReadAIWebhookPayload) -> dict:
 
     brief_ok = False
     try:
-        brief_html = markdown_brief_to_html(extract_meeting_brief(payload))
+        brief_html = markdown_brief_to_html(build_brief(title, transcript))
         for chat in chats:
             _send_document(chat, _file_name(payload, "Бриф", "html"), brief_html, "text/html")
         brief_ok = True
