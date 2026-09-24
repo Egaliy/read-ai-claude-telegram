@@ -147,16 +147,22 @@ def build_digest(title: str, transcript: str) -> dict:
 
 
 def build_brief(title: str, transcript: str) -> str:
-    """Подробный бриф по звонку: решения, причины, статусы, чего не хватает."""
+    """Документ по звонку целиком: бриф + очищенный транскрипт с итогом. Модель отдаёт готовый HTML."""
     with _client().messages.stream(
         model=settings.claude_model,
-        max_tokens=16000,
-        system=_prompt("meeting_brief_v2.txt"),
+        max_tokens=32000,
+        system=_prompt("brief_document.txt"),
         messages=[{"role": "user", "content": f"TRANSCRIPT ({title}):\n{transcript}"}],
     ) as stream:
         msg = stream.get_final_message()
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
-    return re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", text).strip()
+    return re.sub(r"^```(?:html)?\s*|\s*```$", "", text).strip()
+
+
+def brief_chat_ids() -> List[str]:
+    """Документ с брифом уходит только сюда (личка руководителя), не в общий чат."""
+    raw = os.getenv("BRIEF_CHAT_IDS", "")
+    return [c for c in raw.replace(",", " ").split() if c.lstrip("-").isdigit()]
 
 
 def clean_transcript(transcript: str) -> str:
@@ -249,7 +255,7 @@ def build_and_send(payload: ReadAIWebhookPayload) -> dict:
         logger.info("Дайджест: %s пропущен (дейлик)", title)
         return {"skipped": True}
 
-    from app.services.brief_html import markdown_brief_to_html
+
 
     transcript, _ = build_claude_source_text(payload)
     digest = build_digest(title, transcript)
@@ -259,8 +265,8 @@ def build_and_send(payload: ReadAIWebhookPayload) -> dict:
 
     brief_ok = False
     try:
-        brief_html = markdown_brief_to_html(build_brief(title, transcript))
-        for chat in chats:
+        brief_html = build_brief(title, transcript)
+        for chat in brief_chat_ids():
             _send_document(chat, _file_name(payload, "Бриф", "html"), brief_html, "text/html")
         brief_ok = True
     except Exception:
