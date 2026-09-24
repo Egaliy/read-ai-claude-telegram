@@ -263,17 +263,20 @@ def build_and_send(payload: ReadAIWebhookPayload) -> dict:
     for chat in chats:
         _send(chat, format_digest(payload, digest))
 
-    brief_ok = False
-    try:
-        brief_html = build_brief(title, transcript)
-        for chat in brief_chat_ids():
-            _send_document(chat, _file_name(payload, "Бриф", "html"), brief_html, "text/html")
-        brief_ok = True
-    except Exception:
-        logger.exception("Бриф для %s не собрался", payload.meeting_key)
-
+    # Документ и транскрипт — отдельными вызовами: в один лимит времени функции они не укладываются.
+    trigger(payload.meeting_key, stage="brief")
     trigger(payload.meeting_key, stage="transcript")
-    return {"project": digest["project"], "tasks": len(digest.get("tasks", [])), "brief": brief_ok, "chats": len(chats)}
+    return {"project": digest["project"], "tasks": len(digest.get("tasks", [])), "chats": len(chats)}
+
+
+def send_brief(payload: ReadAIWebhookPayload) -> dict:
+    """Документ с брифом и очищенным транскриптом — в личку руководителю."""
+    transcript, _ = build_claude_source_text(payload)
+    html_doc = build_brief(payload.title or "встреча", transcript)
+    chats = brief_chat_ids()
+    for chat in chats:
+        _send_document(chat, _file_name(payload, "Бриф", "html"), html_doc, "text/html")
+    return {"brief": len(html_doc), "chats": len(chats)}
 
 
 def handle_callback(update: dict) -> None:
