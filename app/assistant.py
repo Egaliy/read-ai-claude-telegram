@@ -20,9 +20,10 @@ logger = logging.getLogger(__name__)
 CACHE_TTL = 600  # контекст проекта меняется редко, 10 минут кеша хватает
 
 PICK_SYSTEM = """Ты определяешь, о каких проектах студии спрашивает сотрудник.
-Выбирай названия ТОЧНО из списка. Если вопрос общий («что сегодня горит», «что по всем проектам») — верни
-до пяти самых вероятных. Если проект в вопросе назван иначе, чем в списке, всё равно выбери из списка.
-Если вопрос вообще не про проекты — верни пустой список."""
+Под каждым проектом дана короткая справка и примеры задач — опирайся на них: сотрудник может не называть проект,
+а спросить про экран, механику или клиента («экран выбора языка», «фон на welcome», «что просил Andrew»).
+Выбирай названия ТОЧНО из списка. Если вопрос общий («что горит», «что нового») — верни до трёх самых вероятных.
+Если по справкам не подходит ни один — верни пустой список."""
 
 ANSWER_SYSTEM = """Ты — ассистент дизайн-студии übernatural в рабочем чате Telegram. Сотрудники спрашивают тебя о проектах:
 что решили, что сейчас в работе, кто что делает, какие сроки, чего ждём от клиента, было ли что-то уже сделано.
@@ -35,11 +36,16 @@ ANSWER_SYSTEM = """Ты — ассистент дизайн-студии überna
 - не вываливай всё подряд: выбери главное (свежее, срочное, с дедлайном), а в конце добавь строку
   вроде «Всего по проекту 20 открытых задач — скажи, если нужен полный список»;
 - сразу суть, без вступлений «по вашему запросу» и без пересказа вопроса;
-- называй даты, когда это важно: «решили 23.09», «задача с 18.09 всё ещё в работе»;
+- даты пиши как 23.09 (год только если не текущий); вместо сегодняшней даты говори «сегодня», вместо вчерашней — «вчера»;
+- если спрашивают «надо ли это делать», «актуально ли ещё» — первой строкой дай прямой вердикт:
+  «Да, делать» / «Нет, отменили» / «Уже сделано» / «Неясно — уточни у <кто>», и только потом основания с датой;
 - если речь о задаче — говори её статус: в работе, сделано, ждём клиента;
 - различай: «договорились» ≠ «сделано», «обещал прислать» ≠ «прислал»;
 - если данные расходятся или устарели, скажи об этом прямо;
 - обычный текст, без markdown-разметки и заголовков. Списки — через «•».
+
+Если известно, кто спрашивает, понимай «мне», «мои задачи», «что от меня ждут» как вопрос про этого человека:
+ищи его имя в исполнителях задач и в событиях хронологии. Не нашёл его задач — так и скажи, не переспрашивай, кто он. Если неизвестно, кто спрашивает, попроси назвать имя одной короткой фразой.
 
 Ты в общем чате, ответ видят все. Деньги, договоры, юрлица и личное в материалы не попадают — если спрашивают об этом,
 скажи, что это вопрос к руководству.
@@ -104,9 +110,35 @@ def project_brief(project: dict) -> str:
     return brief
 
 
+def known_projects() -> List[dict]:
+    """Проекты, по которым у агента уже есть материалы: только их и имеет смысл искать."""
+    r = c._redis()
+    if r is None:
+        return c.list_projects()
+    slugs = {k.split(":")[-1] for k in r.scan_iter(c.PAGES_KEY + "*")}
+    return [p for p in c.list_projects() if c._slug(p["name"]) in slugs]
+
+
+def projects_index() -> str:
+    """Название проекта + о чём он + примеры задач: по этому ассистент понимает, куда смотреть."""
+    cached = _cache_get("index")
+    if cached:
+        return cached
+    lines = []
+    for project in known_projects():
+        pages = c.project_pages(project)
+        about = _page_text(pages["context"])[:400].replace("\n", " ")
+        tasks = c._api("POST", f"databases/{pages['tasks']}/query", {"page_size": 8})["results"]
+        titles = "; ".join(c._plain(t["properties"]["Задача"]["title"])[:60] for t in tasks)
+        lines.append(f"- {project['name']}\n  о проекте: {about}\n  примеры задач: {titles}")
+    index = "\n".join(lines) or "— материалов пока нет"
+    _cache_set("index", index)
+    return index
+
+
 def pick_projects(question: str) -> List[dict]:
-    projects = c.list_projects()
-    names = "\n".join(f"- {p['name']}" for p in projects)
+    projects = known_projects()
+    names = projects_index()
     picked = task_preview.json_call(
         system=PICK_SYSTEM,
         schema={
@@ -123,14 +155,29 @@ def pick_projects(question: str) -> List[dict]:
     return out[:4]
 
 
-def answer(question: str, history: Optional[List[dict]] = None) -> str:
+def aliases(name: str) -> List[str]:
+    """Все варианты имени человека: в задачах он может быть «Кирилл», «koka» или «Кирилл (koka)»."""
+    known = task_preview.people()
+    key = name.strip().lower()
+    username = None
+    for k, v in known.items():
+        if k == key or k.startswith(key) or key.startswith(k):
+            username = v.get("username")
+            break
+    if not username:
+        return []
+    return sorted({k for k, v in known.items() if v.get("username") == username} | {name})
+
+
+def answer(question: str, history: Optional[List[dict]] = None, asker: str = "") -> str:
     projects = pick_projects(question)
     if not projects:
-        materials = "Проект по вопросу определить не удалось. Список проектов:\n" + "\n".join(
-            f"- {p['name']}" for p in c.list_projects()
-        )
-    else:
-        materials = "\n\n".join(project_brief(p) for p in projects)
+        # Материалы есть не по всем проектам: если их мало, проще отдать всё, что есть.
+        projects = known_projects()[:3]
+    materials = "\n\n".join(project_brief(p) for p in projects) if projects else "— материалов пока нет"
+    if asker:
+        names = ", ".join(aliases(asker))
+        materials = f"ВОПРОС ЗАДАЁТ: {asker}" + (f" (в задачах может значиться как: {names})" if names else "") + "\n\n" + materials
 
     messages = [
         {"role": "user", "content": f"<материалы>\n{materials}\n</материалы>\n\nДальше вопросы сотрудников. Отвечай по этим материалам."},
@@ -189,9 +236,11 @@ def handle_question(message: dict, bot_username: str) -> bool:
     if not question:
         return False
     chat_id = str((message.get("chat") or {}).get("id"))
+    user = message.get("from") or {}
+    asker = " ".join(x for x in [user.get("first_name"), user.get("last_name")] if x) or user.get("username", "")
     task_preview._api("sendChatAction", {"chat_id": chat_id, "action": "typing"})
     try:
-        reply = answer(question, _history(chat_id))
+        reply = answer(question, _history(chat_id), asker=asker)
         _remember(chat_id, question, reply)
     except Exception as exc:
         logger.exception("Ассистент не ответил")
