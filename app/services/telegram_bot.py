@@ -61,12 +61,6 @@ def seed_allowed_chats() -> None:
 async def handle_telegram_update(update: Dict[str, Any]) -> None:
     callback_query = update.get("callback_query")
     if callback_query:
-        # Кнопка «Полный транскрипт» под дайджестом звонка.
-        if str(callback_query.get("data") or "").startswith("tr:"):
-            from app import task_preview
-
-            await asyncio.to_thread(task_preview.handle_callback, update)
-            return
         message = callback_query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
         if chat_id is not None and not is_allowed(str(chat_id)):

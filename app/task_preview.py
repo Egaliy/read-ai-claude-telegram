@@ -397,6 +397,37 @@ def record_chronicle(payload: ReadAIWebhookPayload) -> dict:
         return {"error": str(exc)[:200]}
 
 
+def handle_command(update: dict) -> bool:
+    """/tag Имя @username — привязать имя из звонков к человеку в Telegram. /tags — список."""
+    msg = update.get("message") or {}
+    text = (msg.get("text") or "").strip()
+    chat = str((msg.get("chat") or {}).get("id") or "")
+    if not text.startswith("/"):
+        return False
+    cmd, _, rest = text.partition(" ")
+    cmd = cmd.split("@")[0].lower()
+
+    if cmd == "/tags":
+        known = people()
+        lines = [f"{name} → @{p['username']}" for name, p in sorted(known.items()) if p.get("username")]
+        _send(chat, "Привязанные имена:\n" + "\n".join(lines) if lines else
+              "Пока никого. Привяжите: /tag Имя @username — тогда я буду тегать человека в задачах.")
+        return True
+
+    if cmd == "/tag":
+        target = (msg.get("reply_to_message") or {}).get("from") or {}
+        parts = rest.split()
+        username = next((p.lstrip("@") for p in parts if p.startswith("@")), target.get("username", ""))
+        name = " ".join(p for p in parts if not p.startswith("@")) or target.get("first_name", "")
+        if not name or not username:
+            _send(chat, "Формат: /tag Имя @username. Или ответьте /tag Имя на сообщение человека.")
+            return True
+        remember_person(name, username, str(target.get("id") or ""))
+        _send(chat, f"Готово: «{name}» → @{username}. Теперь в задачах буду тегать этого человека.")
+        return True
+    return False
+
+
 def trigger(meeting_id: str, stage: str = "digest") -> None:
     """Запустить шаг отдельным вызовом, чтобы уложиться в лимит времени функции."""
     base = f"https://{settings.vercel_stable_domain}"
