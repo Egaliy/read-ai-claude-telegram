@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     notion_parent_page_id: str = ""
     notion_projects_database_id: str = ""
     notion_general_page_id: str = ""
+    telegram_bot_username: str = ""
     vercel_stable_domain: str = "read-ai-claude-telegram.vercel.app"
 
     @property
